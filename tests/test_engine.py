@@ -225,30 +225,64 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(n, 1)
         self.assertTrue(os.path.exists(self.p("photo.png")))
 
-    def test_zip_by_creation_month_and_undo(self):
-        self.make("a.txt", b"aaa")
-        self.make("b.txt", b"bbb")
+    def test_zip_by_modified_month_merges_history_and_undo(self):
+        self.make("a.txt", b"aaa", age_days=1)
+        self.make("b.txt", b"bbb", age_days=1)
+        self.make("old.txt", b"old", age_days=400)
         cfg = self.cfg([rule("zip", [cond("ext", "in", "txt")],
-                             steps=[{"type": "zip", "target": r"アーカイブ\{cyyyy}-{cmm}.zip",
+                             steps=[{"type": "zip", "group": "month", "folder": "アーカイブ", "prefix": "log_",
                                      "remove_original": True}])])
+        items = engine.plan_folder(self.tmp, cfg)
+        self.assertEqual(len(engine.zip_summary(items)), 2)  # テスト表示: ZIP 2個（今月分と1年以上前の月）
         s = engine.run_once(cfg)
-        self.assertEqual(s.total, 2, s.errors)
-        arc = self.p("アーカイブ", time.strftime("%Y-%m") + ".zip")
+        self.assertEqual(s.total, 3, s.errors)
+        recent = time.strftime("%Y-%m", time.localtime(time.time() - DAY))
+        old = time.strftime("%Y-%m", time.localtime(time.time() - 400 * DAY))
+        arc = self.p("アーカイブ", f"log_{recent}.zip")
         with zipfile.ZipFile(arc) as z:
             self.assertEqual(sorted(z.namelist()), ["a.txt", "b.txt"])
             self.assertEqual(z.read("a.txt"), b"aaa")
+        with zipfile.ZipFile(self.p("アーカイブ", f"log_{old}.zip")) as z:
+            self.assertEqual(z.namelist(), ["old.txt"])
         self.assertFalse(os.path.exists(self.p("a.txt")))  # 元はごみ箱へ
+        # 履歴は ZIP 1つにつき1件（2件入った ZIP はまとめて1件）
+        hist = store.load_history()
+        self.assertEqual(len(hist), 2)
+        merged = [e for e in hist if actions.entry_count(e) == 2][0]
+        self.assertEqual(sorted(actions.entry_names(merged)), ["a.txt", "b.txt"])
+        self.assertEqual(actions.entry_destination(merged), arc)
         # 同名ファイルをもう一度追加 → ZIP 内で連番
-        self.make("a.txt", b"second")
+        self.make("a.txt", b"second", age_days=1)
         engine.run_once(cfg)
         with zipfile.ZipFile(arc) as z:
             self.assertIn("a (1).txt", z.namelist())
-        # 元に戻す → ZIP から取り出して元の場所へ
-        first = [e for e in store.load_history() if e["name"] == "b.txt"][0]
-        n, msgs = engine.undo([first["id"]])
-        self.assertEqual(n, 1, msgs)
+        # まとめた履歴を元に戻す → 2件とも ZIP から取り出し、更新日時も元に戻る
+        n, msgs = engine.undo([merged["id"]])
+        self.assertEqual(n, 2, msgs)
         with open(self.p("b.txt"), "rb") as fh:
             self.assertEqual(fh.read(), b"bbb")
+        with open(self.p("a.txt"), "rb") as fh:
+            self.assertEqual(fh.read(), b"aaa")
+        self.assertLess(os.path.getmtime(self.p("b.txt")), time.time() - DAY / 2)
+        self.assertTrue(next(e for e in store.load_history() if e["id"] == merged["id"])["undone"])
+
+    def test_old_zip_template_is_migrated(self):
+        def step(target):
+            return config.normalize_step({"type": "zip", "target": target, "remove_original": True})
+        s = step(r"アーカイブ\{cyyyy}-{cmm}.zip")
+        self.assertEqual((s["group"], s["folder"], s["prefix"]), ("cmonth", "アーカイブ", ""))
+        s = step(r"アーカイブ\スクリーンショット_{cyyyy}-{cmm}.zip")
+        self.assertEqual((s["group"], s["prefix"]), ("cmonth", "スクリーンショット_"))
+        self.assertEqual(step(r"a\{yyyy}-{mm}-{dd}.zip")["group"], "day")
+        self.assertEqual(step(r"a\まとめ.zip")["group"], "all")
+        s = step(r"a\{yyyy}\{mm}.zip")
+        self.assertEqual((s["group"], s["target"]), ("custom", r"a\{yyyy}\{mm}.zip"))
+        from filesorter.rules import zip_template
+        for t in (r"アーカイブ\{cyyyy}-{cmm}.zip", r"a\まとめ.zip", r"a\{yyyy}\{mm}.zip"):
+            self.assertEqual(zip_template(step(t)), t)  # 読み替えても保存先は変わらない
+        self.assertEqual(zip_template({"group": "all", "folder": "z", "prefix": ""}), r"z\{rule}.zip")
+        self.assertTrue(validate_rule(rule("z", [cond("ext", "in", "txt")],
+                                           steps=[{"type": "zip", "group": "month", "folder": ""}]), CATS))
 
     def test_zip_into_watch_root_is_rejected(self):
         self.make("a.txt")

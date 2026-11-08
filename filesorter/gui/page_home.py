@@ -103,6 +103,8 @@ class HomePage(Page):
                           "完全に終了するには左下の電源ボタンを押してください。",
                   style="Sub.TLabel").pack(anchor="w", pady=(10, 0))
         self._quick_sig = None
+        self._banner_sig = None
+        self._tree_sig = None
 
     # ---------------------------------------------------------------- 更新
     def on_show(self):
@@ -144,18 +146,21 @@ class HomePage(Page):
         self.resident_btn.configure(text="常駐を停止" if running else "常駐を開始",
                                     style="TButton" if running else "Accent.TButton")
 
-        for w in self.banner_holder.winfo_children():
-            w.destroy()
         rules = cfg.get("rules", [])
         enabled_auto = [r for r in rules if r.get("enabled") and r.get("trigger", "auto") == "auto"]
-        if not enabled_auto:
-            Banner(self.banner_holder, t, "warn",
-                   "自動で実行される有効なルールがありません。ルール画面で作成・有効化してください（サンプルは無効状態です）。",
-                   "ルールを開く", lambda: self.app.show("rules")).pack(fill="x", pady=(14, 0))
         missing = [f for f in folders if not os.path.isdir(f)]
-        if missing:
-            Banner(self.banner_holder, t, "warn", f"監視フォルダが見つかりません: {missing[0]}",
-                   "設定を開く", lambda: self.app.show("settings")).pack(fill="x", pady=(14, 0))
+        banner_sig = (not enabled_auto, missing[0] if missing else None)
+        if banner_sig != self._banner_sig:  # 内容が同じなら作り直さない（ちらつき防止）
+            self._banner_sig = banner_sig
+            for w in self.banner_holder.winfo_children():
+                w.destroy()
+            if not enabled_auto:
+                Banner(self.banner_holder, t, "warn",
+                       "自動で実行される有効なルールがありません。ルール画面で作成・有効化してください（サンプルは無効状態です）。",
+                       "ルールを開く", lambda: self.app.show("rules")).pack(fill="x", pady=(14, 0))
+            if missing:
+                Banner(self.banner_holder, t, "warn", f"監視フォルダが見つかりません: {missing[0]}",
+                       "設定を開く", lambda: self.app.show("settings")).pack(fill="x", pady=(14, 0))
 
         # クイック操作
         manual = [r for r in rules if r.get("trigger") == "manual"]
@@ -179,13 +184,19 @@ class HomePage(Page):
         now = time.time()
         today0 = time.mktime(time.strptime(time.strftime("%Y-%m-%d"), "%Y-%m-%d"))
         active = [h for h in hist if not h.get("undone")]
-        self.stat_vals["today"].configure(text=f"{sum(1 for h in active if h.get('time', 0) >= today0)} 件")
-        self.stat_vals["week"].configure(text=f"{sum(1 for h in active if h.get('time', 0) >= now - 7 * 86400)} 件")
-        self.stat_vals["total"].configure(text=f"{len(active)} 件")
+        n = actions.entry_count  # ZIP にまとめた履歴は中のファイル数で数える
+        self.stat_vals["today"].configure(text=f"{sum(n(h) for h in active if h.get('time', 0) >= today0)} 件")
+        self.stat_vals["week"].configure(text=f"{sum(n(h) for h in active if h.get('time', 0) >= now - 7 * 86400)} 件")
+        self.stat_vals["total"].configure(text=f"{sum(n(h) for h in active)} 件")
         self.stat_vals["rules"].configure(text=f"{sum(1 for r in rules if r.get('enabled'))} / {len(rules)}")
 
+        recent = hist[-30:]
+        tree_sig = (tuple((h.get("id"), h.get("undone")) for h in recent), tuple(folders))
+        if tree_sig == self._tree_sig:
+            return
+        self._tree_sig = tree_sig
         self.tree.delete(*self.tree.get_children())
-        for h in reversed(hist[-30:]):
+        for h in reversed(recent):
             dest = actions.entry_destination(h)
             label = "取消済" if h.get("undone") else actions.entry_label(h)
             tag = "undone" if h.get("undone") else ("error" if h.get("error") else "")

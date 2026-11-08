@@ -8,6 +8,7 @@ import fnmatch
 import logging
 import os
 import time
+import zipfile
 from dataclasses import dataclass, field
 
 from . import actions, store, winapi
@@ -153,6 +154,29 @@ def plan_folder(folder: str, cfg: dict, now: float | None = None, rules: list | 
     return items
 
 
+def zip_summary(items: list[PlanItem]) -> list[tuple[str, int]]:
+    """実行予定のうち、ZIP にまとめるファイルの数を ZIP ごとに数える（テスト表示用）。戻り値: [(ZIPのパス, 件数)]"""
+    counts: dict = {}
+    for it in items:
+        if it.status != "run":
+            continue
+        for p in it.steps:
+            if p.type == "zip" and p.target and not p.stop:
+                counts[p.target] = counts.get(p.target, 0) + 1
+    return sorted(counts.items(), key=lambda x: x[0].casefold())
+
+
+def zip_summary_text(items: list[PlanItem], bases: list[str], limit: int = 4) -> str:
+    from .util import display_path
+    rows = zip_summary(items)
+    if not rows:
+        return ""
+    parts = [f"{display_path(a, bases)} ← {n} 件" for a, n in rows[:limit]]
+    if len(rows) > limit:
+        parts.append(f"ほか {len(rows) - limit} 個")
+    return f"ZIP {len(rows)} 個にまとめます: " + "、".join(parts)
+
+
 # ------------------------------------------------------------------ 実行
 def run_once(cfg: dict, rule_id: str | None = None, progress=None) -> RunSummary:
     """全監視フォルダを1回処理する（プロセス間ロック付き）。
@@ -210,8 +234,8 @@ def run_once(cfg: dict, rule_id: str | None = None, progress=None) -> RunSummary
                     processed.append(final)
         if progress:
             progress(total, total, "")
-        if history:
-            store.append_history(history, cfg.get("history_limit", 1000))
+        if history:  # 同じ ZIP にまとめたファイルは履歴1件にする（summary.entries はファイルごとのまま）
+            store.append_history(actions.merge_zip_entries(history), cfg.get("history_limit", 1000))
         if processed:
             store.add_exclusions(processed, EXCLUDE_PROCESSED)
     return summary
@@ -219,7 +243,7 @@ def run_once(cfg: dict, rule_id: str | None = None, progress=None) -> RunSummary
 
 # ------------------------------------------------------------------ 元に戻す
 def undo(entry_ids: list[str]) -> tuple[int, list[str]]:
-    """履歴を元に戻す。戻したファイルは再仕分けの対象外にする。戻り値: (件数, メッセージ)"""
+    """履歴を元に戻す。戻したファイルは再仕分けの対象外にする。戻り値: (戻したファイル数, メッセージ)"""
     ids = set(entry_ids)
     ok = 0
     messages: list[str] = []
@@ -232,18 +256,25 @@ def undo(entry_ids: list[str]) -> tuple[int, list[str]]:
             if not actions.entry_undoable(e):
                 messages.append(f"{e.get('name')}: ごみ箱へ送ったファイルはごみ箱から復元してください")
                 continue
+            items = actions.entry_items(e)
+            before = sum(1 for i in items if i.get("undone")) if items[0] is not e else 0
             try:
-                path, notes = actions.undo_entry(e)
-            except (actions.StepError, OSError, KeyError) as ex:
+                paths, notes, failed = actions.undo_entry(e)
+            except (actions.StepError, OSError, KeyError, zipfile.BadZipFile) as ex:
                 messages.append(f"{e.get('name')}: {ex}")
+                continue
+            if paths:
+                e["restored_to"] = paths[0]
+                restored += paths
+            messages += [f"{e.get('name')}: {n}" for n in dict.fromkeys(notes)]
+            if failed:  # まとめた履歴の一部だけ戻せた場合は、残りをもう一度戻せるようにしておく
+                messages.append(f"{e.get('name')}: {len(failed)} 件は元に戻せませんでした")
+                messages += failed[:5]
+                ok += sum(1 for i in actions.entry_items(e) if i.get("undone")) - before
                 continue
             e["undone"] = True
             e["undone_time"] = time.time()
-            if path:
-                e["restored_to"] = path
-                restored.append(path)
-            messages += [f"{e.get('name')}: {n}" for n in dict.fromkeys(notes)]
-            ok += 1
+            ok += actions.entry_count(e) - before
         store.save_history(hist)
         if restored:
             store.add_exclusions(restored, EXCLUDE_UNDONE)

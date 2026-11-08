@@ -9,9 +9,10 @@ from tkinter import filedialog, ttk
 from .. import actions, engine, store
 from ..config import folder_key, folder_label, normalize_rule, resolve_folder, rule_applies_to, watch_folders
 from ..rules import (AGE_UNITS, COMMAND_PLACEHOLDERS, CONFLICTS, FIELD_KINDS, FIELD_LABELS, FIELDS, MAX_DEPTH,
-                     PLACEHOLDERS, SIZE_UNITS, STEP_DEFAULTS, STEP_TYPES, TRIGGERS, FileInfo, RuleResult,
+                     PLACEHOLDERS, SIZE_UNITS, STEP_DEFAULTS, STEP_TYPES, TRIGGERS, ZIP_GROUP_LABELS, ZIP_GROUPS,
+                     FileInfo, RuleResult,
                      describe_condition, evaluate_rule, group_label, is_group, new_condition, new_group, ops_for,
-                     validate_rule)
+                     validate_rule, zip_template)
 from ..util import display_path, elide_middle
 from . import trace
 from .widgets import ScrollFrame, Tooltip, card, make_text, make_tree, set_text
@@ -22,6 +23,21 @@ DEPTH_COLORS = ["accent", "#a78bfa", "#f59e0b", "#34d399", "#f472b6", "#60a5fa"]
 STEP_KEYS = [k for k, _, _ in STEP_TYPES]
 STEP_NAMES = [label for _, label, _ in STEP_TYPES]
 CONFLICT_KEYS = {label: k for k, label in CONFLICTS}
+ZIP_GROUP_BY_LABEL = {label: k for k, label, _ in ZIP_GROUPS}
+# ZIP のファイル名の例（まとめ方ごと）。名前欄の右に「＋ 2026-09.zip」のように表示する
+ZIP_NAME_EXAMPLES = {"month": "2026-09", "cmonth": "2026-09", "day": "2026-09-15", "year": "2026", "ext": "png",
+                     "category": "画像", "all": "", "each": "(元のファイル名)"}
+ZIP_HINTS = {
+    "month": "更新日時の年月ごとに別のZIPへ入れます。ダウンロードやコピーをしても変わりにくい日時なので、通常はこれがおすすめです。",
+    "cmonth": "作成日時の年月ごとに別のZIPへ入れます。別のドライブからコピーしたファイルは、コピーした日が作成日時になります。",
+    "day": "更新日時の日付ごとに別のZIPへ入れます。",
+    "year": "更新日時の年ごとに別のZIPへ入れます。",
+    "ext": "拡張子ごとに別のZIPへ入れます（png.zip、pdf.zip など）。",
+    "category": "設定の「種類」ごとに別のZIPへ入れます（画像.zip、文書.zip など）。",
+    "all": "条件に合ったファイルをすべて1つのZIPに入れます。名前が空ならルール名を使います。",
+    "each": "ファイルごとに、同じ名前のZIPを1つずつ作ります。",
+    "custom": "保存先のパスを差し込みで自由に指定します（例: アーカイブ\\{yyyy}\\{mm}.zip）。",
+}
 
 
 def tree_text(node: dict, categories: dict, prefix: str = "", last: bool = True, top: bool = True) -> list[str]:
@@ -269,6 +285,9 @@ class ActionRow(ttk.Frame):
         self.v_target = tk.StringVar()
         self.v_conflict = tk.StringVar()
         self.v_remove = tk.BooleanVar()
+        self.v_group = tk.StringVar()    # ZIP: まとめ方（表示名）
+        self.v_folder = tk.StringVar()   # ZIP: 保存先フォルダ
+        self.v_prefix = tk.StringVar()   # ZIP: ファイル名の先頭
         head = ttk.Frame(self)
         head.pack(fill="x")
         self.num = ttk.Label(head, text="", style="Strong.TLabel", width=3)
@@ -286,9 +305,13 @@ class ActionRow(ttk.Frame):
         self.params.pack(fill="x", pady=(8, 0))
         self.preview = ttk.Label(self, text="", style="Sub.TLabel", wraplength=700, justify="left")
         self.preview.pack(anchor="w", pady=(6, 0))
-        for v in (self.v_target, self.v_conflict):
+        for v in (self.v_target, self.v_conflict, self.v_folder, self.v_prefix):
             v.trace_add("write", lambda *a: editor.changed())
         self.set(step)
+
+    @property
+    def zip_group(self) -> str:
+        return ZIP_GROUP_BY_LABEL.get(self.v_group.get(), "month")
 
     @property
     def type(self) -> str:
@@ -302,7 +325,14 @@ class ActionRow(ttk.Frame):
         self.v_target.set(step.get("target", d.get("target", "")))
         self.v_conflict.set(dict(CONFLICTS)[step.get("conflict", d.get("conflict", "rename"))])
         self.v_remove.set(bool(step.get("remove_original", d.get("remove_original", False))))
+        self._set_zip_fields(step if t == "zip" else STEP_DEFAULTS["zip"])
         self._build()
+
+    def _set_zip_fields(self, step: dict):
+        d = STEP_DEFAULTS["zip"]
+        self.v_group.set(ZIP_GROUP_LABELS.get(step.get("group") or d["group"], ZIP_GROUP_LABELS[d["group"]]))
+        self.v_folder.set(step.get("folder", d["folder"]))
+        self.v_prefix.set(step.get("prefix", d["prefix"]))
 
     def get(self) -> dict:
         t = self.type
@@ -314,13 +344,26 @@ class ActionRow(ttk.Frame):
             out["conflict"] = CONFLICT_KEYS.get(self.v_conflict.get(), "rename")
         if "remove_original" in d:
             out["remove_original"] = bool(self.v_remove.get())
+        if t == "zip":
+            out.update(group=self.zip_group, folder=self.v_folder.get().strip(), prefix=self.v_prefix.get())
         return out
 
     def _on_type(self):
         d = STEP_DEFAULTS[self.type]
         self.v_target.set(d.get("target", ""))
         self.v_remove.set(bool(d.get("remove_original", False)))
+        self._set_zip_fields(d if self.type == "zip" else STEP_DEFAULTS["zip"])
         self._build()
+        self.editor.changed()
+
+    def _on_zip_group(self):
+        group = self.zip_group
+        prev = getattr(self, "_zip_group_shown", group)
+        if group == "custom" and prev != "custom" and not self.v_target.get().strip():
+            # 自由指定に切り替えたら、それまでの設定で決まる保存先を初期値にする
+            self.v_target.set(zip_template({"group": prev, "folder": self.v_folder.get(),
+                                            "prefix": self.v_prefix.get()}))
+        self.after_idle(self._build)  # コンボボックス自身も作り直すため、イベント処理の後で
         self.editor.changed()
 
     def _placeholder_button(self, parent, entry, items):
@@ -336,14 +379,17 @@ class ActionRow(ttk.Frame):
             w.destroy()
         t = self.type
         p = self.params
-        label = {"move": "移動先フォルダ", "copy": "コピー先フォルダ", "rename": "新しい名前", "zip": "ZIPファイル",
+        if t == "zip":
+            self._build_zip(p)
+            return
+        label = {"move": "移動先フォルダ", "copy": "コピー先フォルダ", "rename": "新しい名前",
                  "extract": "展開先フォルダ", "command": "コマンド"}.get(t)
         if label:
             ttk.Label(p, text=label, width=12).grid(row=0, column=0, sticky="w")
             e = ttk.Entry(p, textvariable=self.v_target)
             e.grid(row=0, column=1, sticky="ew", padx=(8, 0))
             col = 2
-            if t in ("move", "copy", "extract", "zip"):
+            if t in ("move", "copy", "extract"):
                 ttk.Button(p, text="参照…", command=self._browse).grid(row=0, column=col, padx=(6, 0))
                 col += 1
             self._placeholder_button(p, e, COMMAND_PLACEHOLDERS if t == "command" else PLACEHOLDERS).grid(
@@ -353,15 +399,13 @@ class ActionRow(ttk.Frame):
             ttk.Label(p, text="同名ファイル", width=12).grid(row=1, column=0, sticky="w", pady=(6, 0))
             ttk.Combobox(p, textvariable=self.v_conflict, values=[lbl for _, lbl in CONFLICTS], state="readonly",
                          width=24).grid(row=1, column=1, sticky="w", padx=(8, 0), pady=(6, 0))
-        if t in ("zip", "extract"):
-            text = "ZIPに追加した後、元のファイルをごみ箱へ送る" if t == "zip" else "展開した後、元のZIPをごみ箱へ送る"
-            ttk.Checkbutton(p, text=text, variable=self.v_remove, command=self.editor.changed).grid(
-                row=1, column=1, sticky="w", padx=(8, 0), pady=(6, 0))
+        if t == "extract":
+            ttk.Checkbutton(p, text="展開した後、元のZIPをごみ箱へ送る", variable=self.v_remove,
+                            command=self.editor.changed).grid(row=1, column=1, sticky="w", padx=(8, 0), pady=(6, 0))
         hints = {
             "move": "相対パスは監視フォルダからの位置（例: 画像、文書\\{yyyy}）。",
             "copy": "元のファイルは残し、同じ内容のまま再処理しないよう記録します。",
             "rename": "例: {yyyy}{mm}{dd}_{name}（拡張子も含めて指定。{stem}.{ext} でも可）",
-            "zip": "例: アーカイブ\\{cyyyy}-{cmm}.zip で「作成月ごとにZIP化」。既存のZIPには追記します。",
             "extract": "ZIP形式のみ対応。例: {stem} で「ZIPと同じ名前のフォルダ」に展開。",
             "recycle": "一致したファイルをごみ箱へ送ります（ごみ箱から復元できます）。",
             "command": '例: "C:\\Program Files\\7-Zip\\7z.exe" x "{path}" -o"{dir}\\{stem}"　（最大5分、ウィンドウ非表示で実行）',
@@ -370,9 +414,50 @@ class ActionRow(ttk.Frame):
         ttk.Label(p, text=hints[t], style="Sub.TLabel", wraplength=700, justify="left").grid(
             row=2, column=0, columnspan=4, sticky="w", pady=(6, 0))
 
-    def _browse(self):
+    def _build_zip(self, p):
+        """ZIP: 何を（条件に合ったファイル）・どの単位で・どこへ まとめるか"""
+        group = self._zip_group_shown = self.zip_group
+        ttk.Label(p, text="対象", width=12).grid(row=0, column=0, sticky="w")
+        ttk.Label(p, text="このルールの条件に合ったファイル（1回の実行で見つかった分をまとめて入れます）").grid(
+            row=0, column=1, columnspan=3, sticky="w", padx=(8, 0))
+        ttk.Label(p, text="まとめ方", width=12).grid(row=1, column=0, sticky="w", pady=(6, 0))
+        cb = ttk.Combobox(p, textvariable=self.v_group, values=[lbl for _, lbl, _ in ZIP_GROUPS], state="readonly",
+                          width=24)
+        cb.grid(row=1, column=1, sticky="w", padx=(8, 0), pady=(6, 0))
+        cb.bind("<<ComboboxSelected>>", lambda e: self._on_zip_group())
+        if group == "custom":
+            ttk.Label(p, text="ZIPファイル", width=12).grid(row=2, column=0, sticky="w", pady=(6, 0))
+            e = ttk.Entry(p, textvariable=self.v_target)
+            e.grid(row=2, column=1, sticky="ew", padx=(8, 0), pady=(6, 0))
+            ttk.Button(p, text="参照…", command=self._browse).grid(row=2, column=2, padx=(6, 0), pady=(6, 0))
+            self._placeholder_button(p, e, PLACEHOLDERS).grid(row=2, column=3, padx=(6, 0), pady=(6, 0))
+            row = 3
+        else:
+            ttk.Label(p, text="保存先フォルダ", width=12).grid(row=2, column=0, sticky="w", pady=(6, 0))
+            e = ttk.Entry(p, textvariable=self.v_folder)
+            e.grid(row=2, column=1, sticky="ew", padx=(8, 0), pady=(6, 0))
+            ttk.Button(p, text="参照…", command=lambda: self._browse(self.v_folder)).grid(
+                row=2, column=2, padx=(6, 0), pady=(6, 0))
+            self._placeholder_button(p, e, PLACEHOLDERS).grid(row=2, column=3, padx=(6, 0), pady=(6, 0))
+            ttk.Label(p, text="ZIPの名前", width=12).grid(row=3, column=0, sticky="w", pady=(6, 0))
+            nf = ttk.Frame(p)
+            nf.grid(row=3, column=1, columnspan=3, sticky="w", padx=(8, 0), pady=(6, 0))
+            e2 = ttk.Entry(nf, textvariable=self.v_prefix, width=24)
+            e2.pack(side="left")
+            example = ZIP_NAME_EXAMPLES.get(group, "")
+            ttk.Label(nf, text=(f"＋ {example}.zip" if example else ".zip（空ならルール名）") +
+                      ("　← 先頭に付ける文字（空でも可）" if example else ""), style="Sub.TLabel").pack(side="left", padx=(6, 0))
+            row = 4
+        ttk.Checkbutton(p, text="ZIPに入れた後、元のファイルをごみ箱へ送る", variable=self.v_remove,
+                        command=self.editor.changed).grid(row=row, column=1, columnspan=3, sticky="w", padx=(8, 0),
+                                                          pady=(6, 0))
+        ttk.Label(p, text=ZIP_HINTS.get(group, "") + "　既にあるZIPには追加します。", style="Sub.TLabel",
+                  wraplength=700, justify="left").grid(row=row + 1, column=0, columnspan=4, sticky="w", pady=(6, 0))
+        p.columnconfigure(1, weight=1)
+
+    def _browse(self, var: tk.StringVar | None = None):
         base = self.editor.base_folder()
-        if self.type == "zip":
+        if self.type == "zip" and var is None:
             path = filedialog.asksaveasfilename(parent=self.editor, title="ZIPファイル", defaultextension=".zip",
                                                 initialdir=base or None, filetypes=[("ZIP", "*.zip")],
                                                 confirmoverwrite=False)
@@ -387,7 +472,7 @@ class ActionRow(ttk.Frame):
                 path = rel
         except ValueError:
             pass
-        self.v_target.set(path)
+        (var or self.v_target).set(path)
 
     def set_number(self, n: int):
         self.num.configure(text=f"{n}.")
@@ -487,9 +572,9 @@ class RuleEditor(tk.Toplevel):
         for key, label, _ in STEP_TYPES:
             menu.add_command(label=label, command=lambda k=key: self.add_action({"type": k, **STEP_DEFAULTS[k]}))
         menu.add_separator()
-        menu.add_command(label="例: 作成月ごとに ZIP 化（元はごみ箱へ）",
-                         command=lambda: self.add_action({"type": "zip", "target": r"アーカイブ\{cyyyy}-{cmm}.zip",
-                                                          "remove_original": True}))
+        menu.add_command(label="例: 種類ごとに ZIP 化（元のファイルは残す）",
+                         command=lambda: self.add_action({**STEP_DEFAULTS["zip"], "type": "zip", "group": "category",
+                                                          "remove_original": False}))
         menu.add_command(label="例: 日付を先頭に付けて名前を変更",
                          command=lambda: self.add_action({"type": "rename", "target": "{yyyy}-{mm}-{dd}_{name}"}))
         mb["menu"] = menu
@@ -741,7 +826,10 @@ class RuleEditor(tk.Toplevel):
             msg += "。黄色の行は、より上のルールが先に適用されるか、待機中などでスキップされます"
         if n_out:
             msg += f"。対象外のフォルダのファイル {n_out} 件は判定しません"
-        self.test_summary.configure(text=msg + "。")
+        mine = [a for _, _, _, a in self._test_rows.values()
+                if a.rule is not None and a.rule.get("id") == draft["id"]]
+        zips = engine.zip_summary_text(mine, watch_folders(cfg))
+        self.test_summary.configure(text=msg + "。" + (f"\n{zips}" if zips else ""))
         self._render_test()
 
     def _render_test(self):

@@ -71,7 +71,8 @@ class HistoryPage(Page):
         self._by_id = {}
         shown = 0
         for h in reversed(hist):
-            if q and q not in str(h.get("name", "")).casefold() and q not in str(h.get("rule", "")).casefold():
+            if q and q not in str(h.get("rule", "")).casefold() and not any(
+                    q in n.casefold() for n in actions.entry_names(h)):
                 continue
             undone = bool(h.get("undone"))
             action = "取消済" if undone else actions.entry_label(h)
@@ -106,7 +107,8 @@ class HistoryPage(Page):
             return
         names = "\n".join(f"・{h['name']}（{actions.entry_label(h)}）" for h in items[:8])
         names += f"\n…ほか {len(items) - 8} 件" if len(items) > 8 else ""
-        if not messagebox.askyesno("元に戻す", f"{len(items)} 件を元に戻しますか？\n（動作を逆の順に取り消します）\n\n{names}",
+        files = sum(actions.entry_count(h) for h in items)
+        if not messagebox.askyesno("元に戻す", f"{files} 件のファイルを元に戻しますか？\n（動作を逆の順に取り消します）\n\n{names}",
                                    parent=self.app.root):
             return
         try:

@@ -121,7 +121,9 @@ class TestPage(Page):
             counts[it.status] = counts.get(it.status, 0) + 1
         parts = [f"{STATUS_LABELS[k]} {counts[k]}" for k in ("run", "ignore", "nomatch", "skip", "error")
                  if counts.get(k)]
-        self.sim_summary.configure(text=f"全 {len(items)} 件：" + "　/　".join(parts) + f"　（判定 {elapsed * 1000:.0f} ms）")
+        zips = engine.zip_summary_text(items, [folder])
+        self.sim_summary.configure(text=f"全 {len(items)} 件：" + "　/　".join(parts) + f"　（判定 {elapsed * 1000:.0f} ms）"
+                                        + (f"\n{zips}" if zips else ""))
         self._render()
 
     def _render(self):

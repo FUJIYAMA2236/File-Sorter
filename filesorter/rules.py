@@ -68,12 +68,54 @@ STEP_DEFAULTS = {
     "move": {"target": "", "conflict": "rename"},
     "copy": {"target": "", "conflict": "rename"},
     "rename": {"target": "{yyyy}{mm}{dd}_{name}", "conflict": "rename"},
-    "zip": {"target": r"アーカイブ\{cyyyy}-{cmm}.zip", "remove_original": True},
+    # group: ZIP_GROUPS のキー。custom のときだけ target（保存先のテンプレート）を使う
+    "zip": {"group": "month", "folder": "アーカイブ", "prefix": "", "target": "", "remove_original": True},
     "extract": {"target": r"{stem}", "remove_original": False},
     "recycle": {},
     "command": {"target": '"C:\\path\\to\\app.exe" "{path}"'},
     "ignore": {},
 }
+# ZIP のまとめ方: (キー, 表示名, ZIP ファイル名に使う差し込み)。条件に合ったファイルを、この単位ごとの ZIP に入れる
+ZIP_GROUPS = [
+    ("month", "更新月ごと", "{yyyy}-{mm}"),
+    ("cmonth", "作成月ごと", "{cyyyy}-{cmm}"),
+    ("day", "更新日ごと", "{yyyy}-{mm}-{dd}"),
+    ("year", "更新年ごと", "{yyyy}"),
+    ("ext", "拡張子ごと", "{ext}"),
+    ("category", "種類ごと", "{category}"),
+    ("all", "すべてを1つのZIPに", ""),
+    ("each", "1ファイルずつ別のZIPに", "{stem}"),
+    ("custom", "自由に指定（差し込みで）", None),
+]
+ZIP_GROUP_LABELS = {k: label for k, label, _ in ZIP_GROUPS}
+ZIP_GROUP_KEYS = {k: key for k, _, key in ZIP_GROUPS}
+
+
+def zip_template(step: dict) -> str:
+    """ZIP 動作の保存先（差し込みを含むテンプレート。相対パスは監視フォルダ基準）"""
+    group = step.get("group") or "custom"
+    if group not in ZIP_GROUP_KEYS or group == "custom":
+        return str(step.get("target") or "").strip()
+    folder = str(step.get("folder") or "").strip().rstrip("\\/")
+    name = str(step.get("prefix") or "") + ZIP_GROUP_KEYS[group]
+    name = name.strip() or "{rule}"
+    return (folder + "\\" if folder else "") + name + ".zip"
+
+
+def zip_step_from_template(target: str) -> dict:
+    """旧形式（保存先テンプレートのみ）の ZIP 動作を、まとめ方の設定に読み替える。読み替えられなければ custom。"""
+    t = str(target or "").strip()
+    m = re.fullmatch(r"(?:(?P<folder>.*)[\\/])?(?P<name>[^\\/]*)\.zip", t, re.IGNORECASE)
+    if m:
+        folder, name = m.group("folder") or "", m.group("name")
+        for key, _, ph in ZIP_GROUPS:
+            if ph and name.endswith(ph) and "{" not in folder:
+                return {"group": key, "folder": folder, "prefix": name[: -len(ph)], "target": ""}
+        if name and "{" not in name and "{" not in folder:
+            return {"group": "all", "folder": folder, "prefix": name, "target": ""}
+    return {"group": "custom", "folder": "", "prefix": "", "target": t}
+
+
 CONFLICTS = [("rename", "連番を付ける"), ("overwrite", "上書き（既存はごみ箱へ）"), ("skip", "処理しない")]
 CONFLICT_LABELS = dict(CONFLICTS)
 TRIGGERS = [("auto", "自動（定期実行・今すぐ仕分け）"), ("manual", "手動のみ（クイック操作）")]
@@ -435,9 +477,15 @@ def validate_rule(rule: dict, categories: dict) -> list[str]:
     for i, s in enumerate(steps, 1):
         t = s.get("type")
         prefix = f"動作{i}（{STEP_SHORT.get(t, t)}）: "
-        if t in ("move", "copy", "rename", "zip", "command") and not str(s.get("target", "")).strip():
+        if t in ("move", "copy", "rename", "command") and not str(s.get("target", "")).strip():
             errors.append(prefix + {"move": "移動先フォルダ", "copy": "コピー先フォルダ", "rename": "新しい名前",
-                                    "zip": "ZIPファイルの保存先", "command": "コマンド"}[t] + "を入力してください。")
+                                    "command": "コマンド"}[t] + "を入力してください。")
+        if t == "zip":
+            if s.get("group", "custom") == "custom":
+                if not str(s.get("target", "")).strip():
+                    errors.append(prefix + "ZIPファイルの保存先を入力してください。")
+            elif not str(s.get("folder", "")).strip():
+                errors.append(prefix + "ZIPの保存先フォルダを入力してください（監視フォルダ直下には作れません）。")
         if t == "rename" and re.search(r"[\\/]", str(s.get("target", ""))):
             errors.append(prefix + "新しい名前にフォルダ区切り（\\ /）は使えません。")
         if step_is_terminal(s) and i < len(steps):
@@ -514,7 +562,9 @@ def describe_step(step: dict) -> str:
     if t == "rename":
         return f"名前変更 → {target}"
     if t == "zip":
-        return f"ZIP化 → {target}" + ("（元はごみ箱）" if step.get("remove_original") else "")
+        group = step.get("group", "custom")
+        how = "" if group == "custom" else f"（{ZIP_GROUP_LABELS.get(group, group)}）"
+        return f"ZIP化{how} → {zip_template(step)}" + ("（元はごみ箱）" if step.get("remove_original") else "")
     if t == "extract":
         return f"展開 → {target or '{stem}'}" + ("（ZIPはごみ箱）" if step.get("remove_original") else "")
     if t == "command":

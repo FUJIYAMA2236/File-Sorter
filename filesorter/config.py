@@ -13,7 +13,7 @@ from pathlib import Path
 
 from . import APP_ID
 from .rules import (AGE_UNITS, CONFLICTS, DEFAULT_UNITS, FIELD_KINDS, MAX_DEPTH, OPS, SIZE_UNITS, STEP_DEFAULTS,
-                    TRIGGERS, is_group, new_condition, new_group)
+                    TRIGGERS, ZIP_GROUP_KEYS, is_group, new_condition, new_group, zip_step_from_template)
 
 log = logging.getLogger(__name__)
 
@@ -180,9 +180,9 @@ def _sample_rules() -> list[dict]:
             new_condition("category", "is", "image"),
             new_group("any", [new_condition("name", "contains", "screenshot|スクリーンショット"),
                               new_condition("name", "startswith", "IMG_")]),
-            {**new_condition("ctime", "older", "30"), "unit": "day"},
+            {**new_condition("mtime", "older", "30"), "unit": "day"},
         ]),
-        "actions": [{"type": "zip", "target": r"アーカイブ\スクリーンショット_{cyyyy}-{cmm}.zip",
+        "actions": [{"type": "zip", "group": "month", "folder": "アーカイブ", "prefix": "スクリーンショット_",
                      "remove_original": True}],
     }))
     return rules
@@ -255,6 +255,13 @@ def normalize_step(s: dict) -> dict:
         out["conflict"] = s.get("conflict") if s.get("conflict") in dict(CONFLICTS) else d["conflict"]
     if "remove_original" in d:
         out["remove_original"] = bool(s.get("remove_original", d["remove_original"]))
+    if t == "zip":
+        if s.get("group") in ZIP_GROUP_KEYS:
+            out.update(group=s["group"], folder=str(s.get("folder") or ""), prefix=str(s.get("prefix") or ""))
+        elif "group" not in s and s.get("target"):
+            out.update(zip_step_from_template(s["target"]))  # 旧形式（保存先テンプレートのみ）からの読み替え
+        else:
+            out.update(group=d["group"], folder=d["folder"], prefix=d["prefix"])
     return out
 
 

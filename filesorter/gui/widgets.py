@@ -25,14 +25,21 @@ class ScrollFrame(ttk.Frame):
         self.vsb.grid(row=0, column=1, sticky="ns")
         self.columnconfigure(0, weight=1)
         self.rowconfigure(0, weight=1)
+        self._width = 0
+        self._region = None
         self.body.bind("<Configure>", self._on_body)
         self.canvas.bind("<Configure>", self._on_canvas)
 
     def _on_body(self, _e=None):
-        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        region = self.canvas.bbox("all")
+        if region != self._region:  # 変わらないときは再設定しない（無駄な再描画を避ける）
+            self._region = region
+            self.canvas.configure(scrollregion=region)
 
     def _on_canvas(self, e):
-        self.canvas.itemconfigure(self._win, width=e.width)
+        if e.width != self._width:  # 高さだけの変化では中身を組み直さない
+            self._width = e.width
+            self.canvas.itemconfigure(self._win, width=e.width)
 
     def can_scroll(self) -> bool:
         return self.body.winfo_reqheight() > self.canvas.winfo_height()

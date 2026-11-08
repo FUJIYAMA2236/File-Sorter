@@ -2,4 +2,4 @@
 
 APP_NAME = "ファイル仕分け君"
 APP_ID = "FileSortKun"
-__version__ = "2.0.0"
+__version__ = "2.1.0"

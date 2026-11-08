@@ -15,7 +15,7 @@ import zipfile
 from dataclasses import dataclass
 
 from . import winapi
-from .rules import STEP_SHORT, FileInfo, category_of
+from .rules import STEP_SHORT, FileInfo, category_of, zip_template
 
 log = logging.getLogger(__name__)
 
@@ -135,8 +135,9 @@ def move_file(src: str, dst: str) -> None:
         raise
 
 
-def zip_archive_path(template: str, info, rule, categories, base, name=None) -> str:
-    p = resolve_path(template, info, rule, categories, base, name)
+def zip_archive_path(step: dict, info, rule, categories, base, name=None) -> str:
+    """ZIP 動作で、このファイルを入れる ZIP の絶対パス（まとめ方の設定から決まる）"""
+    p = resolve_path(zip_template(step), info, rule, categories, base, name)
     if p and not p.lower().endswith(".zip"):
         p += ".zip"
     return p
@@ -213,7 +214,7 @@ def preview(rule: dict, info: FileInfo, base: str, categories: dict) -> list[Ste
                 break
             path, name = target, os.path.basename(target)
         elif t == "zip":
-            arc = zip_archive_path(tgt, info, rule, categories, base, name)
+            arc = zip_archive_path(step, info, rule, categories, base, name)
             note = "元のファイルはごみ箱へ" if step.get("remove_original") else "元のファイルは残します"
             if same_dir(os.path.dirname(arc), base):
                 note = "保存先が監視フォルダ直下のため実行できません"
@@ -288,7 +289,7 @@ def _run_step(step: dict, path: str, info: FileInfo, rule: dict, categories: dic
         os.rename(path, target)
         return target, {"type": "rename", "from": path, "to": target, "replaced": replaced}
     if t == "zip":
-        arc = zip_archive_path(tgt, info, rule, categories, base, name)
+        arc = zip_archive_path(step, info, rule, categories, base, name)
         if not arc:
             raise StepError("ZIPファイルの保存先が設定されていません")
         if same_dir(os.path.dirname(arc), base):
@@ -391,8 +392,61 @@ def _rec_text(rec: dict) -> str:
 
 
 # ------------------------------------------------------------------ 履歴の表示・元に戻す
+# 同じ実行で同じ ZIP にまとめたファイルは、履歴1件（ZIP 1つにつき1件）にまとめて記録する。
+# その場合、各ファイルの記録は items に入る（items の各要素は通常の履歴と同じ name/src/size/steps/final を持つ）。
+def merge_zip_entries(entries: list[dict]) -> list[dict]:
+    order: list = []          # ("one", entry) or ("zip", key)
+    groups: dict = {}
+    for e in entries:
+        steps = e.get("steps") or []
+        last = steps[-1] if steps else {}
+        if e.get("error") or e.get("skipped") or last.get("type") != "zip":
+            order.append(("one", e))
+            continue
+        key = (e.get("rule_id"), os.path.normcase(last.get("archive", "")))
+        if key not in groups:
+            groups[key] = []
+            order.append(("zip", key))
+        groups[key].append(e)
+    out = []
+    for kind, x in order:
+        if kind == "one":
+            out.append(x)
+            continue
+        items = groups[x]
+        if len(items) == 1:
+            out.append(items[0])
+            continue
+        first = items[0]
+        out.append({
+            "id": secrets.token_hex(6), "time": first.get("time", time.time()),
+            "name": f"{first.get('name', '')} ほか {len(items) - 1} 件", "src": os.path.dirname(first.get("src", "")),
+            "rule": first.get("rule", ""), "rule_id": first.get("rule_id", ""),
+            "size": sum(int(i.get("size") or 0) for i in items),
+            "items": [{k: i.get(k) for k in ("name", "src", "size", "steps", "final")} for i in items],
+            "final": "", "undone": False, "error": "", "skipped": "",
+        })
+    return out
+
+
+def entry_items(e: dict) -> list[dict]:
+    """履歴1件に含まれるファイルごとの記録（まとめていない履歴はそれ自体）"""
+    items = e.get("items")
+    return items if isinstance(items, list) and items else [e]
+
+
+def entry_count(e: dict) -> int:
+    return len(entry_items(e))
+
+
+def entry_names(e: dict) -> list[str]:
+    return [str(i.get("name", "")) for i in entry_items(e)]
+
+
 def entry_steps(e: dict) -> list[dict]:
-    """旧形式（v1: action/src/dst）の履歴も steps 形式で返す。"""
+    """旧形式（v1: action/src/dst）の履歴も steps 形式で返す。まとめた履歴は先頭のファイルの動作。"""
+    if isinstance(e.get("items"), list) and e["items"]:
+        return entry_steps(e["items"][0])
     if isinstance(e.get("steps"), list):
         return e["steps"]
     if e.get("action") == "move":
@@ -420,15 +474,49 @@ def entry_destination(e: dict) -> str:
 
 
 def entry_undoable(e: dict) -> bool:
-    return not e.get("undone") and any(s.get("type") in ("move", "rename", "copy", "zip", "extract")
-                                       for s in entry_steps(e))
+    return not e.get("undone") and any(
+        not i.get("undone") and any(s.get("type") in ("move", "rename", "copy", "zip", "extract")
+                                    for s in entry_steps(i))
+        for i in entry_items(e))
 
 
-def undo_entry(e: dict) -> tuple[str | None, list[str]]:
-    """1件の履歴を逆順に取り消す。戻り値: (元に戻ったファイルのパス or None, 注意事項)"""
+def undo_entry(e: dict) -> tuple[list[str], list[str], list[str]]:
+    """1件の履歴を取り消す（ファイルごとに動作を逆順に）。
+    戻り値: (元に戻ったファイルのパス, 注意事項, 戻せなかったファイルのメッセージ)。
+    まとめていない履歴で失敗した場合は例外を投げる。まとめた履歴は戻せたファイルに undone を付ける。"""
+    items = entry_items(e)
+    batch = items[0] is not e
+    restored: list[str] = []
+    notes: list[str] = []
+    failed: list[str] = []
+    zips: dict = {}
+    try:
+        for item in items:
+            if batch and item.get("undone"):
+                continue
+            try:
+                path, n = _undo_steps(entry_steps(item), zips)
+            except (StepError, OSError, KeyError, zipfile.BadZipFile) as ex:
+                if not batch:
+                    raise
+                failed.append(f"{item.get('name')}: {ex}")
+                continue
+            if batch:
+                item["undone"] = True
+            if path:
+                restored.append(path)
+            notes += n
+    finally:
+        for z in zips.values():
+            z.close()
+    return restored, notes, failed
+
+
+def _undo_steps(steps: list[dict], zips: dict) -> tuple[str | None, list[str]]:
+    """1ファイル分の動作を逆順に取り消す。zips は開いた ZIP の使い回し用（まとめて戻すときに速くする）"""
     notes: list[str] = []
     restored = None
-    for s in reversed(entry_steps(e)):
+    for s in reversed(steps):
         t = s.get("type")
         if t in ("move", "rename"):
             if not os.path.exists(s["to"]):
@@ -444,10 +532,20 @@ def undo_entry(e: dict) -> tuple[str | None, list[str]]:
                 winapi.send_to_recycle_bin(s["to"])
         elif t == "zip":
             if s.get("removed"):
+                key = os.path.normcase(s["archive"])
+                if key not in zips:
+                    zips[key] = zipfile.ZipFile(s["archive"])
+                z = zips[key]
+                zi = z.getinfo(s["entry"])
                 dest = next_free_path(s["from"])
                 os.makedirs(os.path.dirname(dest), exist_ok=True)
-                with zipfile.ZipFile(s["archive"]) as z, z.open(s["entry"]) as src_f, open(dest, "wb") as out_f:
+                with z.open(zi) as src_f, open(dest, "wb") as out_f:
                     shutil.copyfileobj(src_f, out_f, 1024 * 1024)
+                try:  # 更新日時を ZIP に記録された日時に戻す（「更新月ごと」などの判定が変わらないように）
+                    ts = time.mktime(zi.date_time + (0, 0, -1))
+                    os.utime(dest, (ts, ts))
+                except (OverflowError, ValueError, OSError):
+                    pass
                 restored = dest
             notes.append("ZIP 内のファイルはそのまま残ります")
         elif t == "extract":

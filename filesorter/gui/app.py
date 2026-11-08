@@ -78,6 +78,8 @@ class App:
         t = self.theme
         self.root.configure(bg=t.c("bg"))
         self.run_buttons = []
+        self._buttons_busy = None   # ボタンに最後に反映した実行中状態
+        self._status_shown = None   # サイドバーの状態表示に最後に反映した (色, 文字)
         self.container = tk.Frame(self.root, bg=t.c("bg"))
         self.container.pack(fill="both", expand=True)
         side = tk.Frame(self.container, bg=t.c("side"), width=236)
@@ -232,9 +234,12 @@ class App:
             color, text = t.c("warn"), "一時停止中"
         else:
             color, text = t.c("ok"), "監視中"
+        if (color, text) == self._status_shown:
+            return
         try:
             self.status_dot.configure(fg=color)
             self.status_text.configure(text=text)
+            self._status_shown = (color, text)
         except tk.TclError:
             pass
 
@@ -242,9 +247,13 @@ class App:
     def register_run_button(self, button: ttk.Button, keep_text: bool = False):
         """「今すぐ仕分け」系のボタンを登録すると、実行中は自動で無効化される（連打防止）。"""
         self.run_buttons.append((button, button.cget("text"), keep_text))
-        self._update_run_buttons()
+        self._update_run_buttons(force=True)
 
-    def _update_run_buttons(self):
+    def _update_run_buttons(self, force: bool = False):
+        # 定期ポーリングのたびに configure するとボタンが再描画されてちらつくため、状態が変わったときだけ反映する
+        if not force and self.busy == self._buttons_busy:
+            return
+        self._buttons_busy = self.busy
         alive = []
         for btn, text, keep in self.run_buttons:
             try:
