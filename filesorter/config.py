@@ -93,6 +93,33 @@ def watch_folders(cfg: dict) -> list[str]:
     return [resolve_folder(f) for f in cfg.get("watch_folders", [])]
 
 
+def folder_key(path: str) -> str:
+    """フォルダ比較用のキー（表記を実際のパスに解決して大文字小文字を無視）"""
+    return os.path.normcase(resolve_folder(path))
+
+
+def rule_applies_to(rule: dict, folder: str) -> bool:
+    """ルールがその監視フォルダ（実際のパス）を対象にするか。folders が空ならすべて対象。"""
+    scope = rule.get("folders") or []
+    if not scope:
+        return True
+    key = os.path.normcase(os.path.normpath(folder))
+    return any(folder_key(f) == key for f in scope)
+
+
+def folder_label(entry: str) -> str:
+    """監視フォルダの表示名（短い名前）"""
+    if entry.strip() == DOWNLOADS_TOKEN:
+        return "ダウンロード"
+    return os.path.basename(resolve_folder(entry)) or entry
+
+
+def missing_rule_folders(cfg: dict, rule: dict) -> list[str]:
+    """ルールが対象に指定しているが、監視フォルダに無いもの"""
+    keys = {folder_key(f) for f in cfg.get("watch_folders", [])}
+    return [f for f in rule.get("folders") or [] if folder_key(f) not in keys]
+
+
 def folder_token_for(path: str) -> str:
     """フォルダ選択結果を、可搬性の高い表記（{downloads} / アプリフォルダからの相対）に変換する。"""
     from .winapi import downloads_folder
@@ -252,6 +279,9 @@ def normalize_rule(r: dict) -> dict:
         "trigger": r.get("trigger") if r.get("trigger") in dict(TRIGGERS) else "auto",
         "conditions": normalize_node(conds),
         "actions": [normalize_step(s) for s in actions if isinstance(s, dict)],
+        # 対象の監視フォルダ（監視フォルダの表記のまま保存。空 = すべての監視フォルダ）
+        "folders": list(dict.fromkeys(str(f).strip() for f in (r.get("folders") or [])
+                                      if isinstance(f, str) and f.strip())),
     }
 
 

@@ -1,6 +1,7 @@
 """判定トレース（どのルールのどの条件・グループが一致/不一致だったか）の表示用テキスト生成"""
 from __future__ import annotations
 
+from ..config import rule_applies_to
 from ..engine import PlanItem
 from ..rules import NodeResult, describe_condition, group_label
 from ..util import fmt_age, fmt_datetime, fmt_size
@@ -52,17 +53,23 @@ def node_lines(nr: NodeResult, categories: dict, indent: int) -> list:
 
 
 def rules_trace(traces: list, rules: list, categories: dict, matched_rule: dict | None,
-                highlight_id: str | None = None) -> list:
+                highlight_id: str | None = None, folder: str | None = None) -> list:
     """traces は find_matching_rule(trace=True) の結果。判定されなかった残りのルールも表示する。"""
     out = [("\nルールの判定（上から順に評価し、最初に一致したルールを適用）\n", "h")]
-    by_id = {id(t.rule): t for t in traces}
+    by_id = {t.rule.get("id"): t for t in traces}
     for n, rule in enumerate(rules, 1):
         name = rule.get("name", "")
         mark = " ◀ 編集中" if highlight_id and rule.get("id") == highlight_id else ""
-        t = by_id.get(id(rule))
+        t = by_id.get(rule.get("id"))
         if t is None:
-            why = (f"先に「{matched_rule.get('name')}」に一致したため判定しません" if matched_rule
-                   else "このルールは対象外です（手動のみ など）")
+            if folder and not rule_applies_to(rule, folder):
+                why = "このフォルダは対象外のルールです"
+            elif rule.get("trigger") == "manual":
+                why = "手動のみのルールです（クイック操作で実行）"
+            elif matched_rule:
+                why = f"先に「{matched_rule.get('name')}」に一致したため判定しません"
+            else:
+                why = "判定していません"
             out.append((f"{n:>2}. – {name}{mark}　（{why}）\n", "muted"))
             continue
         if t.note == "無効":

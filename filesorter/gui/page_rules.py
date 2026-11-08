@@ -5,7 +5,7 @@ import copy
 import json
 from tkinter import filedialog, messagebox, ttk
 
-from ..config import new_rule_id, normalize_rule
+from ..config import folder_label, missing_rule_folders, new_rule_id, normalize_rule
 from ..rules import describe_actions, describe_conditions
 from .page_base import Page
 from .widgets import Tooltip, make_tree
@@ -43,9 +43,10 @@ class RulesPage(Page):
             ("no", "#", 40, "center", False),
             ("state", "状態", 72, "center", False),
             ("trigger", "実行", 64, "center", False),
-            ("name", "ルール名", 170, "w", False),
-            ("conds", "条件", 380, "w", True),
-            ("action", "動作", 240, "w", True),
+            ("name", "ルール名", 160, "w", False),
+            ("scope", "対象フォルダ", 120, "w", False),
+            ("conds", "条件", 340, "w", True),
+            ("action", "動作", 220, "w", True),
         ], height=14)
         frame.pack(fill="both", expand=True)
         self.tree.tag_configure("disabled", foreground=t.c("muted"))
@@ -71,7 +72,14 @@ class RulesPage(Page):
             self.tree.insert("", "end", iid=r["id"], tags=() if r.get("enabled") else ("disabled",),
                              values=(i, "● 有効" if r.get("enabled") else "○ 無効",
                                      "手動" if r.get("trigger") == "manual" else "自動", r.get("name"),
-                                     describe_conditions(r, cats), describe_actions(r)))
+                                     self._scope_text(r), describe_conditions(r, cats), describe_actions(r)))
+
+    def _scope_text(self, rule: dict) -> str:
+        folders = rule.get("folders") or []
+        if not folders:
+            return "すべて"
+        text = ", ".join(folder_label(f) for f in folders)
+        return ("⚠ " + text) if missing_rule_folders(self.cfg, rule) else text
         if sel and self.tree.exists(sel):
             self.tree.selection_set(sel)
             self.tree.focus(sel)

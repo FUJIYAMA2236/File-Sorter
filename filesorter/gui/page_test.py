@@ -84,6 +84,9 @@ class TestPage(Page):
         self.cb_folder["values"] = folders
         if not self.v_folder.get() and folders:
             self.v_folder.set(folders[0])
+        self.cb_vfolder["values"] = folders
+        if self.v_vfolder.get() not in folders and folders:
+            self.v_vfolder.set(folders[0])
         self._live_eval()
 
     def _browse(self):
@@ -142,7 +145,7 @@ class TestPage(Page):
         it.info.get_urls()
         chunks = trace.file_header(it, self._now) + trace.result_line(it)
         if it.traces:
-            chunks += trace.rules_trace(it.traces, self._rules, self._cats, it.rule)
+            chunks += trace.rules_trace(it.traces, self._rules, self._cats, it.rule, folder=it.folder)
         elif it.status == "skip" and not it.rule:
             chunks.append(("\nこのファイルはルール判定の前にスキップされました（設定の除外パターン・待機時間など）。\n", "muted"))
         set_text(self.sim_text, chunks)
@@ -174,6 +177,13 @@ class TestPage(Page):
             if hint:
                 ttk.Label(form, text=hint, style="Sub.TLabel").grid(row=r, column=2, sticky="w", padx=(12, 0))
 
+        self.v_vfolder = tk.StringVar()
+
+        def folder_box(b):
+            self.cb_vfolder = ttk.Combobox(b, textvariable=self.v_vfolder, state="readonly", width=58)
+            self.cb_vfolder.pack(side="left")
+
+        row(7, "置かれる監視フォルダ", folder_box, hint="ルールの「対象フォルダ」の確認用")
         row(0, "ファイル名", lambda b: ttk.Entry(b, textvariable=self.v_vname, width=46).pack(side="left"))
         row(1, "サイズ",
             lambda b: ttk.Entry(b, textvariable=self.v_vsize, width=10).pack(side="left"),
@@ -194,14 +204,14 @@ class TestPage(Page):
         row(5, "参照元ページURL", lambda b: ttk.Entry(b, textvariable=self.v_vref, width=60).pack(side="left"),
             hint="ReferrerUrl（任意）")
         btns = ttk.Frame(form)
-        btns.grid(row=6, column=1, sticky="w", padx=(14, 0), pady=(8, 0))
+        btns.grid(row=8, column=1, sticky="w", padx=(14, 0), pady=(8, 0))
         ttk.Button(btns, text="実在ファイルから読み込む…", command=self._load_real).pack(side="left")
         form.columnconfigure(2, weight=1)
 
         xf, self.v_text = make_text(f, t, height=12)
         xf.pack(fill="both", expand=True, pady=(12, 0))
         for v in (self.v_vname, self.v_vsize, self.v_vsize_unit, self.v_vmtime, self.v_vmtime_unit,
-                  self.v_vctime, self.v_vctime_unit, self.v_vurl, self.v_vref):
+                  self.v_vctime, self.v_vctime_unit, self.v_vurl, self.v_vref, self.v_vfolder):
             v.trace_add("write", lambda *a: self._schedule_live())
         self._live_after = None
 
@@ -228,11 +238,12 @@ class TestPage(Page):
         info = FileInfo(path="", name=name, size=size, mtime=mtime, ctime=ctime,
                         urls=(self.v_vurl.get().strip(), self.v_vref.get().strip()))
         folders = watch_folders(cfg) or [""]
+        folder = self.v_vfolder.get() if self.v_vfolder.get() in folders else folders[0]
         ctx = engine.build_context(cfg, now)
         rules = cfg.get("rules", [])
-        it = engine.plan_file(info, folders[0], engine.auto_rules(cfg), ctx, trace=True)
+        it = engine.plan_file(info, folder, engine.rules_for_folder(engine.auto_rules(cfg), folder), ctx, trace=True)
         chunks = trace.file_header(it, now) + trace.result_line(it)
-        chunks += trace.rules_trace(it.traces, rules, cfg.get("categories", {}), it.rule)
+        chunks += trace.rules_trace(it.traces, rules, cfg.get("categories", {}), it.rule, folder=folder)
         if not rules:
             chunks.append(("\nルールがありません。ルール画面で作成してください。\n", "muted"))
         set_text(self.v_text, chunks)

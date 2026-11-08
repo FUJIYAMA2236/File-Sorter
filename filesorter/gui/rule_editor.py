@@ -7,11 +7,12 @@ import tkinter as tk
 from tkinter import filedialog, ttk
 
 from .. import actions, engine, store
-from ..config import normalize_rule, watch_folders
+from ..config import folder_key, folder_label, normalize_rule, resolve_folder, rule_applies_to, watch_folders
 from ..rules import (AGE_UNITS, COMMAND_PLACEHOLDERS, CONFLICTS, FIELD_KINDS, FIELD_LABELS, FIELDS, MAX_DEPTH,
-                     PLACEHOLDERS, SIZE_UNITS, STEP_DEFAULTS, STEP_TYPES, TRIGGERS, FileInfo, describe_condition,
-                     evaluate_rule, group_label, is_group, new_condition, new_group, ops_for, validate_rule)
-from ..util import display_path
+                     PLACEHOLDERS, SIZE_UNITS, STEP_DEFAULTS, STEP_TYPES, TRIGGERS, FileInfo, RuleResult,
+                     describe_condition, evaluate_rule, group_label, is_group, new_condition, new_group, ops_for,
+                     validate_rule)
+from ..util import display_path, elide_middle
 from . import trace
 from .widgets import ScrollFrame, Tooltip, card, make_text, make_tree, set_text
 
@@ -450,6 +451,7 @@ class RuleEditor(tk.Toplevel):
         for key, label in TRIGGERS:
             ttk.Radiobutton(tr, text=label, value=key, variable=self.v_trigger, command=self.changed).pack(
                 side="left", padx=(0, 18))
+        self._build_scope(c1, row=2)
         c1.columnconfigure(2, weight=1)
 
         # ---- 条件
@@ -539,6 +541,57 @@ class RuleEditor(tk.Toplevel):
         self._ready = True
         self.changed()
 
+    # ---------------------------------------------------------------- 対象フォルダ
+    def _build_scope(self, parent, row: int):
+        """どの監視フォルダのファイルを対象にするか（監視フォルダが2つ以上のときに選択肢を表示）"""
+        entries = list(self.app.cfg.get("watch_folders", []))
+        current = self.rule.get("folders") or []
+        cur_keys = {folder_key(f) for f in current}
+        entry_keys = {folder_key(e) for e in entries}
+        extra = [f for f in current if folder_key(f) not in entry_keys]  # 監視フォルダから外れたもの
+        self.v_scope = tk.StringVar(value="some" if current else "all")
+        self.scope_vars: list[tuple[str, tk.BooleanVar]] = []
+        ttk.Label(parent, text="対象フォルダ").grid(row=row, column=0, sticky="nw", pady=(12, 0))
+        box = ttk.Frame(parent)
+        box.grid(row=row, column=1, columnspan=2, sticky="w", padx=(12, 0), pady=(12, 0))
+        if len(entries) <= 1 and not current:
+            ttk.Label(box, text="すべての監視フォルダ（監視フォルダを2つ以上設定すると、ルールごとに対象を選べます）",
+                      style="Sub.TLabel").pack(anchor="w")
+            return
+        radios = ttk.Frame(box)
+        radios.pack(anchor="w")
+        for key, label in (("all", "すべての監視フォルダ"), ("some", "選択したフォルダのみ")):
+            ttk.Radiobutton(radios, text=label, value=key, variable=self.v_scope,
+                            command=self._on_scope).pack(side="left", padx=(0, 18))
+        self.scope_checks = []
+        for entry in entries + extra:
+            v = tk.BooleanVar(value=folder_key(entry) in cur_keys)
+            text = f"{folder_label(entry)}　—　{elide_middle(resolve_folder(entry), 70)}"
+            if entry in extra:
+                text += "　⚠ 監視フォルダにありません"
+            chk = ttk.Checkbutton(box, text=text, variable=v, command=self.changed)
+            chk.pack(anchor="w", padx=(24, 0), pady=(4, 0))
+            self.scope_vars.append((entry, v))
+            self.scope_checks.append(chk)
+        self._on_scope(notify=False)
+
+    def _on_scope(self, notify: bool = True):
+        state = "normal" if self.v_scope.get() == "some" else "disabled"
+        for chk in getattr(self, "scope_checks", []):
+            chk.configure(state=state)
+        if notify:
+            self.changed()
+
+    def _scope_folders(self) -> list[str]:
+        if self.v_scope.get() != "some":
+            return []
+        return [entry for entry, v in self.scope_vars if v.get()]
+
+    def _scope_errors(self) -> list[str]:
+        if self.v_scope.get() == "some" and not self._scope_folders():
+            return ["対象フォルダを1つ以上選択してください。"]
+        return []
+
     # ---------------------------------------------------------------- 動作の並び
     def add_action(self, step: dict, notify: bool = True):
         row = ActionRow(self.actions_box, self, step)
@@ -574,6 +627,9 @@ class RuleEditor(tk.Toplevel):
 
     # ---------------------------------------------------------------- 変更 → プレビュー・自動テスト
     def base_folder(self) -> str:
+        scope = self._scope_folders() if hasattr(self, "v_scope") else []
+        if scope:
+            return resolve_folder(scope[0])
         folders = watch_folders(self.app.cfg) or [""]
         return folders[0]
 
@@ -604,12 +660,12 @@ class RuleEditor(tk.Toplevel):
         return {
             "id": self.rule["id"], "name": self.v_name.get().strip(), "enabled": bool(self.v_enabled.get()),
             "trigger": self.v_trigger.get(), "conditions": self.root_group.get(),
-            "actions": [r.get() for r in self.action_rows],
+            "actions": [r.get() for r in self.action_rows], "folders": self._scope_folders(),
         }
 
     def save(self):
         raw = self.collect()
-        errs = validate_rule(raw, self.categories)
+        errs = self._scope_errors() + validate_rule(raw, self.categories)
         if errs:
             self.err_label.configure(text="\n".join(errs[:6]))
             self.bell()
@@ -630,7 +686,7 @@ class RuleEditor(tk.Toplevel):
     def run_test(self):
         self._after = None
         raw = self.collect()
-        errs = validate_rule(raw, self.categories)
+        errs = self._scope_errors() + validate_rule(raw, self.categories)
         self.err_label.configure(text="\n".join(errs[:6]) if errs else "")
         draft = normalize_rule(raw)
         cfg = self.app.reload_config()
@@ -646,7 +702,7 @@ class RuleEditor(tk.Toplevel):
         ctx = engine.build_context(cfg)
         exclusions = store.load_exclusions()
         self._test_rows = {}
-        n_total = n_match = n_applied = 0
+        n_total = n_match = n_applied = n_out = 0
         manual = draft["trigger"] == "manual"
         for folder in watch_folders(cfg):
             if not os.path.isdir(folder):
@@ -655,15 +711,22 @@ class RuleEditor(tk.Toplevel):
                 scanned = engine.scan_folder(folder, cfg, ctx.now, exclusions)
             except OSError:
                 continue
+            in_scope = rule_applies_to(draft, folder)
+            folder_rules = engine.rules_for_folder(auto, folder)
             for info, reason in scanned:
                 n_total += 1
-                rr = evaluate_rule(draft, info, ctx, full=True)
+                if in_scope:
+                    rr = evaluate_rule(draft, info, ctx, full=True)
+                else:  # このルールの対象外のフォルダ
+                    rr = RuleResult(draft, False, None, "対象外のフォルダ")
+                    n_out += 1
                 if reason:
                     applied = engine.PlanItem(folder, info, "skip", reason=reason)
                 elif manual:  # 手動ルールはこのルール単体で実行される
-                    applied = engine.plan_file(info, folder, [dict(draft, enabled=True)], ctx, trace=True)
+                    applied = engine.plan_file(info, folder, engine.rules_for_folder([dict(draft, enabled=True)], folder),
+                                               ctx, trace=True)
                 else:
-                    applied = engine.plan_file(info, folder, auto, ctx, trace=True)
+                    applied = engine.plan_file(info, folder, folder_rules, ctx, trace=True)
                 if rr.matched:
                     n_match += 1
                     if applied.rule is not None and applied.rule.get("id") == draft["id"] and applied.status == "run":
@@ -676,6 +739,8 @@ class RuleEditor(tk.Toplevel):
             msg += "。手動ルールのため、クイック操作で実行したときの結果です"
         if n_match > n_applied:
             msg += "。黄色の行は、より上のルールが先に適用されるか、待機中などでスキップされます"
+        if n_out:
+            msg += f"。対象外のフォルダのファイル {n_out} 件は判定しません"
         self.test_summary.configure(text=msg + "。")
         self._render_test()
 
@@ -701,8 +766,8 @@ class RuleEditor(tk.Toplevel):
                     dest = applied.reason
             else:
                 tag, dest = "muted", ""
-            tree.insert("", "end", iid=iid, tags=(tag,),
-                        values=(info.name, "✔ 一致" if rr.matched else "✘ 不一致", applied_text, dest))
+            this = "✔ 一致" if rr.matched else ("– 対象外" if rr.note == "対象外のフォルダ" else "✘ 不一致")
+            tree.insert("", "end", iid=iid, tags=(tag,), values=(info.name, this, applied_text, dest))
         set_text(self.trace_text, [("行を選択すると、条件ごとの判定結果と処理内容を表示します。", "muted")])
 
     def _on_test_select(self, _e=None):
@@ -722,5 +787,6 @@ class RuleEditor(tk.Toplevel):
                 chunks.append((f"  {n}. {p.text([folder])}\n", "ng" if p.stop else None))
         chunks += trace.result_line(applied)
         if applied.traces:
-            chunks += trace.rules_trace(applied.traces, self._rules, self.categories, applied.rule, self.rule["id"])
+            chunks += trace.rules_trace(applied.traces, self._rules, self.categories, applied.rule, self.rule["id"],
+                                        folder)
         set_text(self.trace_text, chunks)

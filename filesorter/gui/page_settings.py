@@ -6,8 +6,8 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from .. import APP_ID, APP_NAME, __version__, ipc, store, winapi
-from ..config import (APP_DIR, DEFAULT_IGNORE, DOWNLOADS_TOKEN, data_dir, folder_token_for, is_portable,
-                      resolve_folder, switch_storage)
+from ..config import (APP_DIR, DEFAULT_IGNORE, DOWNLOADS_TOKEN, data_dir, folder_key, folder_token_for,
+                      is_portable, resolve_folder, switch_storage)
 from .page_base import Page
 from .widgets import ScrollFrame, card
 
@@ -48,7 +48,8 @@ class SettingsPage(Page):
 
         # ---- 監視フォルダ
         s = section("監視フォルダ", "フォルダ直下のファイルのみが対象です（サブフォルダの中身は対象外）。"
-                                  "ダウンロードフォルダは PC ごとの場所に自動で読み替えます。")
+                                  "ダウンロードフォルダは PC ごとの場所に自動で読み替えます。"
+                                  "2つ以上登録すると、ルールごとに対象のフォルダを選べます（ルールの編集画面）。")
         lf = ttk.Frame(s, style="Card.TFrame", padding=2)
         lf.pack(side="left", fill="x", expand=True)
         self.lb = tk.Listbox(lf, height=4, bd=0, highlightthickness=0, activestyle="none", bg=t.c("text_bg"),
@@ -239,6 +240,15 @@ class SettingsPage(Page):
             return
         if missing and not messagebox.askyesno("設定", f"存在しないフォルダがあります:\n{missing[0]}\n\nこのまま保存しますか？",
                                                parent=self.app.root):
+            return
+        new_keys = {folder_key(f) for f in folders}
+        orphaned = [r["name"] for r in self.cfg.get("rules", [])
+                    if any(folder_key(f) not in new_keys for f in r.get("folders") or [])]
+        if orphaned and not messagebox.askyesno(
+                "設定", "監視フォルダから外すフォルダを、次のルールが対象に指定しています:\n"
+                        + "\n".join(f"・{n}" for n in orphaned[:8])
+                        + "\n\nそのフォルダではこれらのルールは動かなくなります（ルール一覧に ⚠ を表示）。\n保存しますか？",
+                parent=self.app.root):
             return
         try:
             interval = int(float(self.v_interval.get())) * dict(UNITS)[self.v_interval_unit.get() or "秒"]

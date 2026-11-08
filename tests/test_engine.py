@@ -310,6 +310,31 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(engine.run_once(cfg, rule_id=cfg["rules"][0]["id"]).total, 1)
         self.assertTrue(os.path.exists(self.p("手動", "m.pdf")))
 
+    def test_rule_folder_scope(self):
+        a, b = self.p("A"), self.p("B")
+        os.makedirs(a)
+        os.makedirs(b)
+        for d in (a, b):
+            for n in ("x.pdf", "y.txt"):
+                p = os.path.join(d, n)
+                open(p, "wb").close()
+                t = time.time() - DAY
+                os.utime(p, (t, t))
+        only_b = dict(rule("Bのpdf", [cond("ext", "in", "pdf")], steps=[move("pdf")]), folders=[b.upper()])
+        both = rule("txt", [cond("ext", "in", "txt")], steps=[move("txt")])
+        gone = dict(rule("無い", [cond("all", "always")], steps=[move("x")]), folders=[self.p("存在しない")])
+        cfg = config.normalize_config(dict(version=2, watch_folders=[a, b], settle_sec=0,
+                                           rules=[gone, only_b, both]))
+        self.assertEqual(cfg["rules"][1]["folders"], [b.upper()])
+        s = engine.run_once(cfg)
+        self.assertEqual(s.total, 3, s.errors)
+        self.assertTrue(os.path.exists(os.path.join(a, "x.pdf")))          # A は対象外
+        self.assertTrue(os.path.exists(os.path.join(b, "pdf", "x.pdf")))   # B だけ処理
+        self.assertTrue(os.path.exists(os.path.join(a, "txt", "y.txt")))   # 指定なし = 両方
+        self.assertTrue(os.path.exists(os.path.join(b, "txt", "y.txt")))
+        self.assertEqual(config.missing_rule_folders(cfg, cfg["rules"][0]), [self.p("存在しない")])
+        self.assertTrue(config.rule_applies_to(cfg["rules"][2], a))
+
     def test_progress_callback(self):
         for n in ("a.pdf", "b.pdf", "c.pdf"):
             self.make(n)

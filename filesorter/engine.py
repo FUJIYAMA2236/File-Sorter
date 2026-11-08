@@ -11,7 +11,7 @@ import time
 from dataclasses import dataclass, field
 
 from . import actions, store, winapi
-from .config import watch_folders
+from .config import rule_applies_to, watch_folders
 from .ipc import LOCK_RUN
 from .rules import EvalContext, FileInfo, actions_short, find_matching_rule
 
@@ -79,6 +79,11 @@ def auto_rules(cfg: dict) -> list:
     return [r for r in cfg.get("rules", []) if r.get("trigger", "auto") == "auto"]
 
 
+def rules_for_folder(rules: list, folder: str) -> list:
+    """その監視フォルダを対象にするルールだけに絞る（ルールの「対象フォルダ」設定）"""
+    return [r for r in rules if rule_applies_to(r, folder)]
+
+
 # ------------------------------------------------------------------ スキャン / 計画
 def scan_folder(folder: str, cfg: dict, now: float, exclusions: dict | None = None,
                 reasons: tuple = (EXCLUDE_UNDONE, EXCLUDE_PROCESSED)) -> list[tuple[FileInfo, str]]:
@@ -136,7 +141,7 @@ def plan_folder(folder: str, cfg: dict, now: float | None = None, rules: list | 
                 trace: bool = False, exclusions: dict | None = None,
                 reasons: tuple = (EXCLUDE_UNDONE, EXCLUDE_PROCESSED)) -> list[PlanItem]:
     ctx = build_context(cfg, now)
-    rules = auto_rules(cfg) if rules is None else rules
+    rules = rules_for_folder(auto_rules(cfg) if rules is None else rules, folder)
     if exclusions is None:
         exclusions = store.load_exclusions()
     items = []
