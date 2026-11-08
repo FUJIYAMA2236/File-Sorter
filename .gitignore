@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# ビルド成果物（tools/build_exe.ps1）
+build/
+dist/
+*.spec
+
+# ポータブルモードのデータ・個人環境のファイル
+data/
+portable.txt
+*.lnk
+
+# エディタ
+.vscode/
+.idea/
